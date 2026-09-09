@@ -65,7 +65,17 @@
     width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 18px;
   }
   .icon-btn:hover { background: #1e293b; }
+  .icon-btn.active { border-color: #0ea5e9; background: #10203a; color: #38bdf8; }
+  .icon-btn.recording { border-color: #f43f5e; background: #3f0e1a; color: #fb7185; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+  .icon-btn:disabled { opacity: .35; cursor: not-allowed; }
   main { flex: 1; padding: 14px; }
+
+  .chat-list { flex: 1; overflow-y: auto; max-height: 46vh; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
+  .chat-line { font-size: 17px; font-weight: 500; line-height: 1.35; padding-bottom: 8px; border-bottom: 1px solid #1e293b; }
+  .chat-line:last-child { border-bottom: none; padding-bottom: 0; }
+  .chat-line .chat-src { font-size: 11px; color: #64748b; margin-bottom: 2px; }
+  body.project-mode .chat-line { font-size: 26px; }
 
   .langToggleRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .langChip {
@@ -128,8 +138,11 @@
   <h1 class="app-title">VKL Übersetzer</h1>
   <div class="inputRow">
     <textarea id="input" rows="1" placeholder="Text eingeben … (Enter = übersetzen, Umschalt+Enter = Zeilenumbruch)"></textarea>
+    <button class="icon-btn" id="micBtn" title="Spracheingabe">🎤</button>
     <button class="btn-primary" id="sendBtn">Senden</button>
   </div>
+  <button class="icon-btn" id="chatBtn" title="Chat-Modus">💬</button>
+  <button class="icon-btn" id="newChatBtn" title="Neues Gespräch" style="display:none;">🔄</button>
   <button class="icon-btn" id="historyBtn" title="Historie">🕘</button>
   <button class="icon-btn settings" id="settingsBtn" title="Einstellungen">⚙️</button>
   <button class="icon-btn" id="projectBtn" title="Projektionsmodus">🖥️</button>
@@ -214,6 +227,9 @@ let histLimit = parseInt(localStorage.getItem("vkl_hist_limit") || "50", 10);
 let history = JSON.parse(localStorage.getItem("vkl_history") || "[]");
 let currentTranslations = {}; // code -> text
 let projectMode = false;
+let chatMode = localStorage.getItem("vkl_chatmode") === "1";
+let sessionId = null;
+let session = []; // { text, translations: {name: text}, detected, time }
 
 const $ = (id) => document.getElementById(id);
 const input = $("input");
@@ -266,15 +282,47 @@ function renderGrid() {
     const label = document.createElement("div");
     label.className = "lang-label";
     label.textContent = lang.name;
-    const trans = document.createElement("div");
-    trans.className = "translation";
-    const val = currentTranslations[lang.code];
-    if (val) { trans.textContent = val; }
-    else { trans.textContent = "—"; trans.classList.add("placeholder"); }
     card.appendChild(label);
-    card.appendChild(trans);
+
+    if (chatMode) {
+      const list = document.createElement("div");
+      list.className = "chat-list";
+      session.forEach((turn) => {
+        const val = turn.translations[lang.name];
+        if (!val) return;
+        const line = document.createElement("div");
+        line.className = "chat-line";
+        const src = document.createElement("div");
+        src.className = "chat-src";
+        src.textContent = turn.text;
+        const body = document.createElement("div");
+        body.textContent = val;
+        line.appendChild(src);
+        line.appendChild(body);
+        list.appendChild(line);
+      });
+      if (list.children.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "translation placeholder";
+        empty.textContent = "—";
+        card.appendChild(empty);
+      } else {
+        card.appendChild(list);
+      }
+    } else {
+      const trans = document.createElement("div");
+      trans.className = "translation";
+      const val = currentTranslations[lang.code];
+      if (val) { trans.textContent = val; }
+      else { trans.textContent = "—"; trans.classList.add("placeholder"); }
+      card.appendChild(trans);
+    }
     grid.appendChild(card);
   });
+  if (chatMode) {
+    // Alle Chat-Spalten nach unten scrollen, damit der neueste Turn sichtbar ist.
+    grid.querySelectorAll(".chat-list").forEach((el) => { el.scrollTop = el.scrollHeight; });
+  }
 }
 
 function showError(msg) {
@@ -299,19 +347,33 @@ async function translateAll(text) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
     currentTranslations = data.translations || {};
-    renderGrid();
-    if (data.detected) {
-      $("detectedLang").textContent = "Erkannte Eingabesprache: " + data.detected;
-    } else {
-      $("detectedLang").textContent = "";
+    const detected = data.detected || null;
+
+    if (chatMode) {
+      if (!sessionId) sessionId = crypto.randomUUID();
+      const namedForSession = {};
+      pool.filter((l) => active.includes(l.code)).forEach((l) => { namedForSession[l.name] = currentTranslations[l.code]; });
+      session.push({ time: new Date().toISOString(), text, translations: namedForSession, detected });
     }
+
+    renderGrid();
+    $("detectedLang").textContent = detected ? "Erkannte Eingabesprache: " + detected : "";
+
     if (histLimit > 0) {
       const named = {};
       pool.filter((l) => active.includes(l.code)).forEach((l) => { named[l.name] = currentTranslations[l.code]; });
-      history.unshift({ time: new Date().toISOString(), text, translations: named });
+      history.unshift({
+        time: new Date().toISOString(),
+        text,
+        translations: named,
+        sessionId: chatMode ? sessionId : null,
+        detected,
+      });
       history = history.slice(0, histLimit);
       localStorage.setItem("vkl_history", JSON.stringify(history));
     }
+
+    if (chatMode) { input.value = ""; autoGrow(); }
   } catch (e) {
     showError("Übersetzung fehlgeschlagen: " + e.message);
   } finally {
@@ -389,19 +451,59 @@ function renderHistory() {
     const time = new Date(h.time).toLocaleString("de-DE");
     const transStr = Object.entries(h.translations).map(([k, v]) => `${k}: ${v}`).join(" · ");
     div.innerHTML = `<div class="hist-time">${time}</div><div class="hist-source">${h.text}</div><div class="hist-trans">${transStr}</div>`;
+    const btnRow = document.createElement("div");
+    btnRow.style.cssText = "display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;";
     const restoreBtn = document.createElement("button");
     restoreBtn.className = "btn-primary";
-    restoreBtn.style.cssText = "padding:6px 12px; font-size:13px; margin-top:8px;";
+    restoreBtn.style.cssText = "padding:6px 12px; font-size:13px;";
     restoreBtn.textContent = "Erneut anzeigen";
     restoreBtn.addEventListener("click", () => restoreHistoryEntry(idx));
-    div.appendChild(restoreBtn);
+    btnRow.appendChild(restoreBtn);
+    if (h.sessionId) {
+      const resumeBtn = document.createElement("button");
+      resumeBtn.className = "btn-primary";
+      resumeBtn.style.cssText = "padding:6px 12px; font-size:13px; background:#7c3aed;";
+      resumeBtn.textContent = "Gespräch fortsetzen";
+      resumeBtn.addEventListener("click", () => resumeSession(h.sessionId));
+      btnRow.appendChild(resumeBtn);
+    }
+    div.appendChild(btnRow);
     el.appendChild(div);
   });
+}
+
+function resumeSession(sid) {
+  const turns = history.filter((h) => h.sessionId === sid).slice().reverse(); // chronologisch
+  if (turns.length === 0) return;
+  chatMode = true;
+  sessionId = sid;
+  session = turns.map((h) => ({ time: h.time, text: h.text, translations: h.translations, detected: h.detected || null }));
+  const last = turns[turns.length - 1];
+  const matchedCodes = [];
+  Object.keys(last.translations).forEach((name) => {
+    const entry = pool.find((l) => l.name === name);
+    if (entry) matchedCodes.push(entry.code);
+  });
+  if (matchedCodes.length > 0) { active = matchedCodes; saveActive(); }
+  localStorage.setItem("vkl_chatmode", "1");
+  $("chatBtn").classList.add("active");
+  $("newChatBtn").style.display = "";
+  input.value = "";
+  autoGrow();
+  $("detectedLang").textContent = "";
+  renderLangToggles();
+  renderGrid();
+  $("historyModal").style.display = "none";
 }
 
 function restoreHistoryEntry(idx) {
   const h = history[idx];
   if (!h) return;
+  // Chat-Modus ausschalten, damit dieser eine Eintrag unabhängig als Einzelkarte angezeigt wird.
+  chatMode = false;
+  localStorage.setItem("vkl_chatmode", "0");
+  $("chatBtn").classList.remove("active");
+  $("newChatBtn").style.display = "none";
   input.value = h.text;
   autoGrow();
   // Namen aus der Historie zurück auf Codes der aktuellen Merkliste mappen.
@@ -430,6 +532,70 @@ $("clearHistoryBtn").addEventListener("click", () => {
   localStorage.setItem("vkl_history", "[]");
   renderHistory();
 });
+
+// Chat-Modus
+$("chatBtn").addEventListener("click", () => {
+  chatMode = !chatMode;
+  localStorage.setItem("vkl_chatmode", chatMode ? "1" : "0");
+  $("chatBtn").classList.toggle("active", chatMode);
+  $("newChatBtn").style.display = chatMode ? "" : "none";
+  if (chatMode && !sessionId) { sessionId = crypto.randomUUID(); session = []; }
+  renderGrid();
+});
+$("newChatBtn").addEventListener("click", () => {
+  sessionId = crypto.randomUUID();
+  session = [];
+  currentTranslations = {};
+  input.value = "";
+  autoGrow();
+  $("detectedLang").textContent = "";
+  renderGrid();
+});
+if (chatMode) { $("chatBtn").classList.add("active"); $("newChatBtn").style.display = ""; }
+
+// Spracheingabe (Web Speech API) - Unterstützung je nach Browser/Gerät unterschiedlich,
+// v. a. auf iPad/iPhone unzuverlässig. Bei fehlender Unterstützung Button deaktivieren.
+(function setupVoiceInput() {
+  const micBtn = $("micBtn");
+  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognitionCtor) {
+    micBtn.disabled = true;
+    micBtn.title = "Spracheingabe auf diesem Gerät/Browser nicht verfügbar";
+    return;
+  }
+  const recognition = new SpeechRecognitionCtor();
+  recognition.lang = "de-DE";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  let recognizing = false;
+
+  recognition.onresult = (e) => {
+    let finalChunk = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalChunk += e.results[i][0].transcript;
+    }
+    if (finalChunk) {
+      input.value = (input.value.trim() ? input.value.trim() + " " : "") + finalChunk.trim();
+      autoGrow();
+    }
+  };
+  recognition.onend = () => { recognizing = false; micBtn.classList.remove("recording"); };
+  recognition.onerror = () => { recognizing = false; micBtn.classList.remove("recording"); };
+
+  micBtn.addEventListener("click", () => {
+    if (recognizing) {
+      recognition.stop();
+    } else {
+      try {
+        recognition.start();
+        recognizing = true;
+        micBtn.classList.add("recording");
+      } catch (e) {
+        showError("Spracheingabe konnte nicht gestartet werden: " + e.message);
+      }
+    }
+  });
+})();
 
 // Projection mode
 $("projectBtn").addEventListener("click", () => {
